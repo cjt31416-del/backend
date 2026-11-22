@@ -4,13 +4,22 @@ const mysql = require("mysql2/promise");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const DB_NAME = "student_information_db";
+// Database settings. On your computer (XAMPP) the defaults below are used.
+// On Render, set these as Environment Variables instead:
+// DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, DB_SSL
+const DB_NAME = process.env.DB_NAME || "student_information_db";
 
 const DB_CONFIG = {
-  host: "localhost",
-  user: "root",
-  password: "",
+  host: process.env.DB_HOST || "localhost",
+  port: Number(process.env.DB_PORT) || 3306,
+  user: process.env.DB_USER || "root",
+  password: process.env.DB_PASSWORD || "",
 };
+
+// Most hosted MySQL services require an SSL connection.
+if (process.env.DB_SSL === "true") {
+  DB_CONFIG.ssl = { rejectUnauthorized: false };
+}
 
 const ALLOWED_STATUSES = ["Active", "Inactive"];
 const UPDATABLE_FIELDS = [
@@ -203,8 +212,15 @@ async function seedSampleData() {
 async function initializeDatabase() {
   const connection = await mysql.createConnection(DB_CONFIG);
 
-  await connection.query(`CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;`);
-  await connection.end();
+  try {
+    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;`);
+  } catch (error) {
+    // Some hosted databases do not allow creating databases. That is fine
+    // as long as the database in DB_NAME already exists.
+    console.warn("Could not create database (continuing):", error.message);
+  } finally {
+    await connection.end();
+  }
 
   pool = mysql.createPool({
     ...DB_CONFIG,
@@ -283,9 +299,16 @@ app.get("/api/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
 
+    const [[{ total }]] = await pool.query(
+      "SELECT COUNT(*) AS total FROM students"
+    );
+
     res.json({
       status: "ok",
       service: "Student Information System API",
+      storage: "MySQL",
+      database: DB_NAME,
+      studentsInDatabase: total,
       message: "API and MySQL are connected.",
     });
   } catch (error) {
@@ -491,11 +514,20 @@ app.delete("/api/students/:studentId", async (req, res) => {
       return res.status(404).json({ message: "Student not found." });
     }
 
-    await pool.query("DELETE FROM students WHERE studentId = ?", [
-      req.params.studentId,
-    ]);
+    const [result] = await pool.query(
+      "DELETE FROM students WHERE studentId = ?",
+      [req.params.studentId]
+    );
 
-    console.log("Student deleted -> studentId:", student.studentId);
+    if (!result.affectedRows) {
+      return res.status(404).json({ message: "Student not found." });
+    }
+
+    console.log(
+      "Student deleted from MySQL -> studentId:", student.studentId,
+      "| database:", DB_NAME,
+      "| rows removed:", result.affectedRows
+    );
 
     res.json({ message: "Student deleted.", student });
   } catch (error) {
@@ -528,8 +560,17 @@ async function startServer() {
       console.log("===================================");
     });
   } catch (error) {
-    console.error("Cannot connect to MySQL:", error.message);
-    console.error("Check XAMPP MySQL and database credentials.");
+    console.error(
+      "Cannot connect to MySQL:",
+      error.code || "",
+      error.message || ""
+    );
+    console.error(
+      `Tried host: ${DB_CONFIG.host}:${DB_CONFIG.port} | user: ${DB_CONFIG.user} | database: ${DB_NAME}`
+    );
+    console.error(
+      "Check that MySQL is running and that the DB_* settings are correct."
+    );
     process.exit(1);
   }
 }
